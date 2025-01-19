@@ -136,17 +136,12 @@ class BatchMaskA2C:
             action, policy, log_prob, entropy, value, states_hidden = self.net(
                 obs, states_hidden, action_mask, cue
             )
-            print(policy.shape)
-            print(policy)
 
             value = value.view(-1) # (batch_size,)
 
             # step the env
             obs, reward, done, truncated, info = self.env.step(action)
             obs = torch.Tensor(obs) # (batch_size, feature_dim)
-
-            print(obs.shape)
-            print(obs)
 
             reward = torch.Tensor(reward) # (batch_size,)
             action_mask = torch.tensor(np.stack(info['mask'])) # (batch_size, action_dim), bool
