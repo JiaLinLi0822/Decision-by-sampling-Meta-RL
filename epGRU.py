@@ -38,6 +38,7 @@ class EpGRUCell(nn.Module):
         recurrent_activation : str
             Activation function for gates z, r, o, read (default 'sigmoid')
         """
+
         super().__init__()
         self.Dx = input_size
         self.Dh = hidden_size
@@ -74,7 +75,9 @@ class EpGRUCell(nn.Module):
         x_t: torch.Tensor,
         m_t: torch.Tensor,
         state: torch.Tensor
-        """
+        ) -> torch.Tensor:
+        
+        '''
         Parameters
         ----------
         x_t : [B, Dx]
@@ -87,7 +90,8 @@ class EpGRUCell(nn.Module):
         -------
         h_t : [B, Dh]
             Hidden state at current time step
-        """
+        '''
+
         h_tm1 = state
 
         x_proj = self.input_kernel(x_t)     # => [B, 5*Dh]

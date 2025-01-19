@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
 from eplstm import *
+from epGRU import *
 from dnd import *
 
 
@@ -401,6 +402,108 @@ class EpLSTMRecurrentActorCriticPolicy(nn.Module):
         ]
         return action, policy, log_prob, entropy, value, new_states
 
+class EpGRURecurrentActorCriticPolicy(nn.Module):
+    """
+    GRU-based recurrent actor-critic policy with external DND memory & EpGRUCell
+    """
+
+    def __init__(
+            self,
+            feature_dim: int,
+            action_dim: int,
+            gru_hidden_dim: int = 128,
+            dict_len: int = 1000,
+            kernel: str = 'l2',
+        ):
+        super(EpGRURecurrentActorCriticPolicy, self).__init__()
+
+        # Network parameters
+        self.feature_dim = feature_dim
+        self.action_dim = action_dim
+        self.gru_hidden_dim = gru_hidden_dim
+
+        # Feature extractor
+        self.features_extractor = FlattenExtractor()
+
+        # Recurrent neural networks (actor & critic both use EpGRUCell)
+        self.ep_gru_actor = EpGRUCell(input_size=feature_dim, hidden_size=gru_hidden_dim)
+        self.ep_gru_critic = EpGRUCell(input_size=feature_dim, hidden_size=gru_hidden_dim)
+
+        # Policy and value heads
+        self.policy_net = ActionNet(gru_hidden_dim, action_dim)
+        self.value_net = ValueNet(gru_hidden_dim)
+
+        # External memories
+        self.dnd_actor = DND(dict_len, gru_hidden_dim, kernel)
+        self.dnd_critic = DND(dict_len, gru_hidden_dim, kernel)
+
+    def forward(self, obs, states_gru=None, mask=None, cue=None):
+        """
+        Parameters
+        ----------
+        obs : torch.Tensor
+            Observation input of shape [B, ...]
+        states_gru : [h_actor, h_critic] or None
+            If None, hidden states are initialized to zeros.
+            Otherwise, each is [B, gru_hidden_dim].
+        mask : optional, used to mask certain actions (e.g. invalid ones)
+        cue : optional, used to retrieve memory from DND. If None, zero memory is used.
+
+        Returns
+        -------
+        action : Tensor
+            Sampled action(s).
+        policy : Tensor
+            The policy distribution parameters (e.g. logits or prob).
+        log_prob : Tensor
+            Log-prob of the selected action.
+        entropy : Tensor
+            Policy entropy.
+        value : Tensor
+            Value function estimate.
+        new_states : [h_actor_new, h_critic_new]
+            The updated GRU hidden states for actor and critic.
+        """
+
+        # 1) Feature extraction
+        features = self.features_extractor(obs)  # => [B, feature_dim]
+        batch_size = features.size(0)
+
+        # 2) Initialize hidden states if needed
+        if states_gru is None:
+            h_actor = torch.zeros(batch_size, self.gru_hidden_dim, device=obs.device)
+            h_critic = torch.zeros(batch_size, self.gru_hidden_dim, device=obs.device)
+        else:
+            h_actor, h_critic = states_gru
+
+        # 3) Retrieve memory from DND or set to zeros
+        if cue is None:
+            m_t_actor = torch.zeros(batch_size, self.gru_hidden_dim, device=obs.device)
+            m_t_critic = torch.zeros(batch_size, self.gru_hidden_dim, device=obs.device)
+        else:
+            # Same cue for both actor and critic
+            m_t_actor = self.dnd_actor.get_memory(cue)
+            m_t_critic = self.dnd_critic.get_memory(cue)
+
+        # 4) Forward pass through actor GRU
+        h_actor_new = self.ep_gru_actor(features, m_t_actor, h_actor)
+
+        # 5) Forward pass through critic GRU
+        h_critic_new = self.ep_gru_critic(features, m_t_critic, h_critic)
+
+        # 6) Save updated hidden states into DND
+        #    In LSTM we stored c_actor_new/c_critic_new, but for GRU there's only h
+        #    We'll store the new hidden states so that the memory can be retrieved later.
+        self.dnd_actor.save_memory(cue, h_actor_new)
+        self.dnd_critic.save_memory(cue, h_critic_new)
+
+        # 7) Compute action (policy) and value
+        action, policy, log_prob, entropy = self.policy_net(h_actor_new, mask)
+        value = self.value_net(h_critic_new)
+
+        # 8) Output
+        new_states = [h_actor_new, h_critic_new]
+        return action, policy, log_prob, entropy, value, new_states
 
 if __name__ == '__main__':
     # testing
@@ -408,7 +511,6 @@ if __name__ == '__main__':
     feature_dim = 60
     action_dim = 3
     batch_size = 16
-
 
     # net = LSTMRecurrentActorCriticPolicy(
     #     feature_dim = feature_dim,
@@ -431,7 +533,12 @@ if __name__ == '__main__':
     # )
 
 
-    net = EpLSTMRecurrentActorCriticPolicy(
+    # net = EpLSTMRecurrentActorCriticPolicy(
+    #     feature_dim = feature_dim,
+    #     action_dim = action_dim,
+    # )
+
+    net = EpGRURecurrentActorCriticPolicy(
         feature_dim = feature_dim,
         action_dim = action_dim,
     )
@@ -441,12 +548,12 @@ if __name__ == '__main__':
     test_mask = torch.randint(0, 2, size = (batch_size, action_dim), dtype = torch.bool)
 
     # forward pass through the network
-    action, policy, log_prob, entropy, value, states_lstm = net(test_input, mask = test_mask)
+    action, policy, log_prob, entropy, value, states_gru = net(test_input, mask = test_mask, cue = test_input)
 
     print('action:', action)
     print('policy:', policy)
     print('log prob:', log_prob)
     print('entropy:', entropy)
     print('value:', value)
-    print('lstm states:', states_lstm)
-    print('shape of lstm states:', states_lstm[0][0].shape, states_lstm[0][1].shape, states_lstm[1][0].shape, states_lstm[1][1].shape)
+    # print('states:', states_gru)
+    print('shape of lstm states:', states_gru[0].shape, states_gru[1].shape)
